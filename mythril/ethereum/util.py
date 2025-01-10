@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import platform
+import re
 import typing
 from json.decoder import JSONDecodeError
 from subprocess import PIPE, Popen
@@ -168,16 +169,77 @@ except ConnectionError:
     all_versions = solcx.get_installed_solc_versions()
 
 
-def extract_version(file: typing.Optional[str]):
-    if file is None:
+VOID_START = re.compile("//|/\\*|\"|'")
+QUOTE_END = re.compile("(?<!\\\\)'")
+DQUOTE_END = re.compile('(?<!\\\\)"')
+
+
+def remove_comments_strings(program: str) -> str:
+    """Return program without Solidity comments and strings
+
+    :param str program: Solidity program with lines separated by \\n
+    :return: program with strings emptied and comments removed
+    :rtype: str
+    """
+    result = ""
+    while True:
+        match_start_of_void = VOID_START.search(program)
+        if not match_start_of_void:
+            result += program
+            break
+        else:
+            result += program[: match_start_of_void.start()]
+            if match_start_of_void[0] == "//":
+                end = program.find("\n", match_start_of_void.end())
+                program = "" if end == -1 else program[end:]
+            elif match_start_of_void[0] == "/*":
+                end = program.find("*/", match_start_of_void.end())
+                result += " "
+                program = "" if end == -1 else program[end + 2 :]
+            else:
+                if match_start_of_void[0] == "'":
+                    match_end_of_string = QUOTE_END.search(
+                        program[match_start_of_void.end() :]
+                    )
+                else:
+                    match_end_of_string = DQUOTE_END.search(
+                        program[match_start_of_void.end() :]
+                    )
+                if not match_end_of_string:  # unclosed string
+                    break
+                program = program[
+                    match_start_of_void.end() + match_end_of_string.end() :
+                ]
+    return result
+
+
+def extract_version_line(program: typing.Optional[str]) -> typing.Optional[str]:
+    if not program:
         return None
-    version_line = None
-    for line in file.split("\n"):
-        if "pragma solidity" not in line:
-            continue
-        version_line = line.rstrip()
-        break
-    if version_line is None:
+
+    # normalize line endings
+    if "\n" in program:
+        program = program.replace("\r", "")
+    else:
+        program = program.replace("\r", "\n")
+
+    # extract regular pragma
+    program_wo_comments_strings = remove_comments_strings(program)
+    for line in program_wo_comments_strings.split("\n"):
+        if "pragma solidity" in line:
+            return line.rstrip()
+
+    # extract pragma from comments
+    for line in program.split("\n"):
+        if "pragma solidity" in line:
+            return line.rstrip()
+
+    return None
+
+
+def extract_version(program: typing.Optional[str]) -> typing.Optional[str]:
+    version_line = extract_version_line(program)
+    if not version_line:
         return None
 
     assert "pragma solidity" in version_line
@@ -212,11 +274,11 @@ def extract_version(file: typing.Optional[str]):
 
 
 def extract_binary(file: str) -> Tuple[str, str]:
-    file_data = None
+    program = None
     with open(file) as f:
-        file_data = f.read()
+        program = f.read()
 
-    version = extract_version(file_data)
+    version = extract_version(program)
 
     if version is None:
         return os.environ.get("SOLC") or "solc", version
